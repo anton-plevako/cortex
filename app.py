@@ -57,8 +57,9 @@ with st.sidebar:
         st.session_state["clarify_question"] = ""
 
 # ── Clarification prompt (shown when graph is waiting for more info) ─────────
+clarify_placeholder = st.empty()
 if st.session_state["awaiting_clarification"]:
-    st.info(st.session_state["clarify_question"])
+    clarify_placeholder.info(st.session_state["clarify_question"])
     placeholder = "Your answer…"
     label = "Clarification"
 else:
@@ -104,6 +105,7 @@ if submitted and query.strip():
         else:
             st.session_state["awaiting_clarification"] = False
             st.session_state["clarify_question"] = ""
+            clarify_placeholder.empty()  # remove the blue question box
 
     result_type = final.get("result_type", "answer")
     result_text = final.get("result", "No result returned.")

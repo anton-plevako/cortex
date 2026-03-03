@@ -12,13 +12,15 @@ class Timeframe(TypedDict, total=False):
 class AssetState(TypedDict, total=False):
     # ── Input ─────────────────────────────────────────────────────────────────
     user_query: str
+    user_query_original: str  # set at first classify; updated on CLARIFY_PROPERTY resolution
 
     # ── LLM tool-calling loop (sql_agent ↔ ToolNode) ──────────────────────────
     messages: Annotated[list, add_messages]
 
     # ── Extracted slots — preserved across clarify cycles ─────────────────────
     request_type: str             # from classify_node
-    properties: list[str]         # resolved canonical property names
+    raw_properties: list[str]     # extracted by classify; resolved into properties by validate_and_resolve
+    properties: list[str]         # resolved canonical property names (sole writer: validate_and_resolve)
     timeframe: Timeframe          # year / quarter / month extracted from query
     unresolved_entities: list[str]  # property names mentioned but not matched
 

@@ -1,17 +1,20 @@
 """clarify_agent_node + human_interrupt_node — clarification hub and human-in-the-loop."""
 
+import re
 from typing import Literal
 
 from langchain_core.messages import RemoveMessage
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
+from cortex.config import PROPERTY_NAMES
 from cortex.prompts import (
     CLARIFY_AGENT_SYSTEM,
     CLARIFY_FALLBACK_SYSTEM,
     CLARIFY_QUESTION_SYSTEM,
 )
 from cortex.state import AssetState
+from cortex.tools import resolve_property
 
 from ._shared import MAX_CLARIFY_ATTEMPTS, _llm
 
@@ -19,6 +22,30 @@ from ._shared import MAX_CLARIFY_ATTEMPTS, _llm
 class ClarifyDecision(BaseModel):
     action: Literal["ask_human", "fallback", "done"]
     message: str  # question text (ask_human) / explanation (fallback) / empty string (done)
+
+
+def _resolve_from_answer(answer: str, expected_count: int) -> list[str]:
+    """Resolve canonical property names from a free-form clarification answer.
+
+    For a single expected property, tries the full answer string.
+    For multiple, splits on common separators (', ', ' and ', ' & ') and
+    resolves each part independently.  Raises ValueError if the right number
+    of canonical names cannot be extracted.
+    """
+    if expected_count <= 1:
+        return [resolve_property(answer)]  # let ValueError propagate
+
+    parts = [p.strip() for p in re.split(r"\s*(?:and|&|,)\s*", answer, flags=re.IGNORECASE) if p.strip()]
+    resolved: list[str] = []
+    for part in parts:
+        try:
+            resolved.append(resolve_property(part))
+        except ValueError:
+            pass
+
+    if len(resolved) == expected_count:
+        return resolved
+    raise ValueError(f"Could not resolve {expected_count} properties from '{answer}'")
 
 
 def _build_messages(state: AssetState, mode: str) -> list[dict]:
@@ -73,6 +100,7 @@ def _build_messages(state: AssetState, mode: str) -> list[dict]:
 def clarify_agent_node(state: AssetState) -> dict:
     bucket = state.get("error_bucket", "FALLBACK_NO_DATA")
     attempts = state.get("clarify_attempts", 0)
+    unresolved = state.get("unresolved_entities") or []
 
     # Mode 1: replay safety — pending_question already set means the graph resumed
     # after interrupt; skip LLM and re-signal ask_human so route_clarify_agent
@@ -90,6 +118,8 @@ def clarify_agent_node(state: AssetState) -> dict:
             "pending_question": None,
             "last_clarify_question": None,
             "last_clarify_answer": None,
+            "clarify_attempts": 0,  # reset: prevents poisoned attempt count on next query
+            "raw_properties": [],   # clear: prevents stale properties leaking into new query
         }
 
     # Mode 2b: first clarify attempt — generate question, action forced by code
@@ -117,6 +147,54 @@ def clarify_agent_node(state: AssetState) -> dict:
         }
 
     if action == "done":
+        bucket = state.get("error_bucket", "")
+
+        if bucket == "CLARIFY_PROPERTY":
+            # Deterministic bypass: resolve the user's answer directly, skip classify.
+            # This prevents the bad property name(s) from re-entering classify and
+            # triggering another CLARIFY_PROPERTY cycle.
+            answer = state.get("last_clarify_answer") or ""
+            unresolved = state.get("unresolved_entities") or []
+            try:
+                canonicals = _resolve_from_answer(answer, len(unresolved))
+                # Patch bad property name(s) in user_query; use negative lookahead so
+                # "Building 12" does not corrupt "Building 120" (prefix collision).
+                original = state.get("user_query", "")
+                new_query = original
+                for bad_name, canonical in zip(unresolved, canonicals):
+                    new_query = re.sub(re.escape(bad_name) + r'(?!\d)', canonical, new_query)
+                return {
+                    "raw_properties": canonicals,
+                    "user_query": new_query,          # corrected for SQL agent framing
+                    "user_query_original": new_query, # corrected so answer_node narrates right names
+                    "next_action": "validate",        # route_clarify_agent → validate_and_resolve
+                    "pending_question": None,         # clear replay-safety guard
+                    "error_bucket": "",
+                    "unresolved_entities": [],
+                    "tool_result": {},                # clear stale SQL errors
+                    "last_clarify_question": None,    # clear stale prompt context
+                    "last_clarify_answer": None,
+                    "clarify_attempts": 0,
+                    # request_type kept unchanged — classify is skipped
+                }
+            except ValueError:
+                # Answer still unresolvable; ask once more with explicit property list
+                count = len(unresolved)
+                which = "ones" if count > 1 else "one"
+                question = (
+                    f"Sorry, I still couldn't match that to a propert{'y' if count == 1 else 'ies'} "
+                    f"in our portfolio. We manage: {', '.join(PROPERTY_NAMES)}. "
+                    f"Which {which} did you mean?"
+                )
+                return {
+                    "pending_question": question,
+                    "next_action": "ask_human",
+                    "result": question,
+                    "result_type": "clarify",
+                }
+
+        # CLARIFY_QUERY (and any other bucket): concatenate + re-classify
+        # Safe because the original query has no invalid property reference.
         original = state.get("user_query", "")
         answer = state.get("last_clarify_answer", "")
         combined = f"{original} — {answer}" if answer else original
@@ -124,14 +202,12 @@ def clarify_agent_node(state: AssetState) -> dict:
             "user_query": combined,
             "next_action": "done",
             "pending_question": None,
-            # Clear ALL stale routing signals so re-entry to parse_and_validate is clean
             "error_bucket": "",
             "unresolved_entities": [],
             "tool_result": {},
             "last_clarify_question": None,
             "last_clarify_answer": None,
-            # Reset so "unclear" doesn't immediately re-trigger CLARIFY_QUERY on re-parse
-            "request_type": "general",
+            "clarify_attempts": 0,
         }
 
     # action == "fallback"
@@ -142,6 +218,8 @@ def clarify_agent_node(state: AssetState) -> dict:
         "pending_question": None,
         "last_clarify_question": None,
         "last_clarify_answer": None,
+        "clarify_attempts": 0,  # reset: prevents poisoned attempt count on next query
+        "raw_properties": [],   # clear: prevents stale properties leaking into new query
     }
 
 

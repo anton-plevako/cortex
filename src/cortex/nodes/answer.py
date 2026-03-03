@@ -14,8 +14,9 @@ def answer_node(state: AssetState) -> dict:
     period_parts = [v for v in [tf.get("month"), tf.get("quarter"), tf.get("year")] if v]
     period = ", ".join(period_parts) if period_parts else "all available periods"
 
+    display_query = state.get("user_query_original") or state["user_query"]
     user_message = (
-        f"User query: {state['user_query']}\n"
+        f"User query: {display_query}\n"
         f"Time period covered: {period}\n"
         f"Query result (JSON):\n"
         f"{json.dumps(tool_result.get('rows', []), indent=2, default=str)}"

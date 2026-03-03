@@ -36,90 +36,78 @@ _clarify_time_options = (
 )
 
 # ---------------------------------------------------------------------------
-# classify_node
+# classify_node — understand query: classify intent + extract slots (single LLM call)
 # ---------------------------------------------------------------------------
 
-CLASSIFY_SYSTEM = """You classify real-estate asset-management queries into one of six types.
-Return only request_type.
+UNDERSTAND_SYSTEM = """You are a real-estate portfolio assistant. For each user query, do two things.
 
-Types:
-- comparison   - comparing two or more properties (P&L or financials)
-- pnl          - profit/loss, income, revenue, expenses for one or all properties
-- details      - full financial breakdown for a specific property
-- general      - portfolio-level questions, trends, rankings, or any other
-                 question answerable from the ledger data but not fitting the above three
-- unclear      - query is real-estate related but intent or required details are missing
+## Part 1 — Classify request type
+
+Classify into exactly one of:
+- comparison   — comparing two or more properties (P&L or financials)
+- pnl          — profit/loss, income, revenue, expenses for one or all properties
+- details      — full financial breakdown for a specific property
+- general      — portfolio-level questions, trends, rankings, or anything answerable
+                 from the ledger data that doesn't fit the above three
+- unclear      — real-estate related but intent or key slots are missing/ambiguous
                  (e.g. "show me the building", "what about the numbers?")
-- off_topic    - genuinely unrelated to real estate or this portfolio (weather, sports, etc.)
+- off_topic    — genuinely unrelated to real estate or this portfolio
 
 Classification rules:
 - Prefer a specific type (comparison/pnl/details) when the intent is clear.
-- Use "general" for anything that touches the portfolio but doesn't fit neatly:
-  superlatives ("which is best?"), trends, category-specific questions.
-- Use "unclear" for RE-related queries where key slots (property, metric, period) are
-  missing or ambiguous — do NOT discard these as off_topic.
-- Only use "off_topic" when the query has absolutely nothing to do with real estate
-  or this portfolio.
+- Use "general" for superlatives ("which is best?"), trends, category questions.
+- Use "unclear" for RE-related queries where property, metric, or period is missing.
+- Only use "off_topic" when the query has absolutely nothing to do with real estate.
 
 Examples:
-user: "Compare Building 120 and Building 17 this year"        → comparison
-user: "What is the total P&L for 2024?"                       → pnl
-user: "Show me the financials for Building 160 in Q3"         → details
-user: "Which property made the most money last year?"          → general
-user: "What are our biggest cost drivers?"                     → general
-user: "What are our total revenues?"                           → pnl
-user: "How much parking revenue did we earn in 2024?"          → pnl
-user: "What were our mortgage costs last year?"                → pnl
-user: "Which property had the highest rental income in Q3?"    → general
-user: "How is the weather today?"                              → off_topic
-user: "What did Building 140 earn last year?"                  → pnl
-user: "Show me the building"                                   → unclear
-user: "What about the numbers?"                                → unclear
-user: "!!!???##"                                               → unclear
-user: "Tell me about revenues"                                 → unclear"""
+"Compare Building 120 and Building 17 this year"        → comparison
+"What is the total P&L for 2024?"                       → pnl
+"Show me the financials for Building 160 in Q3"         → details
+"Which property made the most money last year?"          → general
+"What are our biggest cost drivers?"                     → general
+"What are our total revenues?"                           → pnl
+"How much parking revenue did we earn in 2024?"          → pnl
+"What were our mortgage costs last year?"                → pnl
+"Which property had the highest rental income in Q3?"    → general
+"How is the weather today?"                              → off_topic
+"What did Building 140 earn last year?"                  → pnl
+"Show me the building"                                   → unclear
+"What about the numbers?"                                → unclear
+"!!!???##"                                               → unclear
+"Tell me about revenues"                                 → unclear
 
-
-# ---------------------------------------------------------------------------
-# resolve_guard_node  (Step 1 — LLM extraction)
-# ---------------------------------------------------------------------------
-
-EXTRACT_SYSTEM = """Extract property identifiers and time filters from a real-estate query.
+## Part 2 — Extract slots
 
 Portfolio properties (the ONLY valid building names): {props}
-
 Available years: {years}
 Available quarters: {quarters} (2025 data = Q1 only)
+Known building numbers: {building_numbers}
 
 Extraction rules:
 - Map shorthand: "120" → "Building 120", "the 17 building" → "Building 17".
 - "this year" → "{current_year}"; "last year" → "{last_year}".
 - "this quarter" → "{current_quarter}"; "last quarter" → "{last_quarter}".
 - "Q4" without a year → "2024-Q4".
-- Always return the literally resolved value. If the resolved year or quarter is
-  not in the available list above, return it anyway — the downstream guard will
-  surface a clear error to the user rather than silently substituting.
+- Always return the literally resolved value even if it is out of range — the downstream
+  guard will surface a clear error rather than silently substituting.
 - Leave year/quarter/month null if not mentioned.
-- If the query is portfolio-wide (no specific property), return properties=[].
-- If a property cannot be confidently identified from the list above, return properties=[].
-- Known building numbers are: {building_numbers}. If a building number is mentioned but
-  does not exactly match one of these, return it as-is — do NOT attempt to correct it
-  (e.g. "Building 10" → properties=["Building 10"], not "Building 180").
+- If the query is portfolio-wide (no specific property mentioned at all), return properties=[].
+- If the user mentions a building, property, or location that you cannot match to the
+  known list, return the description as-is — do NOT drop it and do NOT correct it.
+  The downstream validator will surface the mismatch and ask the user to clarify.
+  Examples: "warehouse building" → ["warehouse building"],
+            "the corner property" → ["the corner property"],
+            "Building 10" → ["Building 10"].
+- If a building number is mentioned but does not match the known list, return it as-is —
+  do NOT correct it (e.g. "Building 10" → ["Building 10"], not "Building 180").
 
 Examples:
-query: "Compare Building 120 and Building 17 in 2025"
-→ properties=["Building 120","Building 17"], year="2025"
-
-query: "Total portfolio P&L for Q1 2025"
-→ properties=[], quarter="2025-Q1"
-
-query: "What did the 120 building earn last year?"
-→ properties=["Building 120"], year="{last_year}"
-
-query: "Which property made the most money?"
-→ properties=[], year=null
-
-query: "Compare 123 Main St and 456 Oak Ave"
-→ properties=[], year=null   (unknown addresses — do NOT guess)
+"Compare Building 120 and Building 17 in 2025" → properties=["Building 120","Building 17"], year="2025"
+"Total portfolio P&L for Q1 2025"              → properties=[], quarter="2025-Q1"
+"What did the 120 building earn last year?"    → properties=["Building 120"], year="{last_year}"
+"Which property made the most money?"          → properties=[], year=null
+"What did the warehouse building earn?"        → properties=["warehouse building"], year=null
+"Compare 123 Main St and 456 Oak Ave"          → properties=["123 Main St","456 Oak Ave"], year=null
 """.format(
     props=", ".join(PROPERTY_NAMES),
     years=", ".join(sorted(VALID_YEARS)),

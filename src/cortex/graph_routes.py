@@ -9,10 +9,10 @@ from cortex.state import AssetState
 
 
 def route_after_classify(state: AssetState) -> str:
-    """off_topic goes to clarify_agent hub; everything else attempts extract+SQL."""
+    """off_topic goes to clarify_agent hub; everything else goes to validate_and_resolve."""
     if state.get("request_type") == "off_topic":
         return "clarify_agent"
-    return "parse_and_validate"
+    return "validate_and_resolve"
 
 
 def route_on_next_action(state: AssetState) -> str:
@@ -37,10 +37,12 @@ def route_sql_agent(state: AssetState) -> str:
 
 
 def route_clarify_agent(state: AssetState) -> str:
-    """Sole owner of fallback → END routing. Also routes ask_human and done."""
+    """Sole owner of fallback → END routing. Also routes ask_human, done, and validate."""
     na = state.get("next_action", "fallback")
     if na == "ask_human":
         return "human_interrupt"
     if na == "done":
-        return "parse_and_validate"
+        return "classify"
+    if na == "validate":
+        return "validate_and_resolve"  # CLARIFY_PROPERTY shortcut — skips classify
     return END  # "fallback" or anything unexpected → terminal

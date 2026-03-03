@@ -14,8 +14,8 @@ from cortex.nodes import (
     classify_node,
     handle_sql_result_node,
     human_interrupt_node,
-    parse_and_validate_node,
     sql_agent_node,
+    validate_and_resolve_node,
 )
 from cortex.state import AssetState
 from cortex.tools import execute_sql
@@ -25,7 +25,7 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AssetState)
 
     graph.add_node("classify", classify_node)
-    graph.add_node("parse_and_validate", parse_and_validate_node)
+    graph.add_node("validate_and_resolve", validate_and_resolve_node)
     graph.add_node("sql_agent", sql_agent_node)
     graph.add_node("sql_executor", ToolNode([execute_sql]))
     graph.add_node("handle_sql_result", handle_sql_result_node)
@@ -38,11 +38,11 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "classify",
         route_after_classify,
-        {"parse_and_validate": "parse_and_validate", "clarify_agent": "clarify_agent"},
+        {"validate_and_resolve": "validate_and_resolve", "clarify_agent": "clarify_agent"},
     )
 
     graph.add_conditional_edges(
-        "parse_and_validate",
+        "validate_and_resolve",
         route_on_next_action,
         {"sql": "sql_agent", "clarify_agent": "clarify_agent"},
     )
@@ -68,7 +68,8 @@ def build_graph() -> StateGraph:
         route_clarify_agent,
         {
             "human_interrupt": "human_interrupt",
-            "parse_and_validate": "parse_and_validate",
+            "classify": "classify",
+            "validate_and_resolve": "validate_and_resolve",  # CLARIFY_PROPERTY shortcut
             END: END,
         },
     )
