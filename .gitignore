@@ -210,3 +210,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# md files
+*.md

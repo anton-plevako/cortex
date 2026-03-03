@@ -1,19 +1,17 @@
-from pathlib import Path
-
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from cortex.nodes import (
-    _MAX_EXTRACT_ATTEMPTS,
-    _MAX_SQL_ATTEMPTS,
-    clarify_node,
+    answer_node,
+    clarify_or_fallback_node,
     classify_node,
-    execute_node,
-    extract_node,
-    plan_sql_node,
-    response_node,
-    validate_node,
+    post_router_node,
+    resolve_guard_node,
+    sql_agent_node,
 )
 from cortex.state import AssetState
+from cortex.tools import execute_sql
 
 
 # ---------------------------------------------------------------------------
@@ -21,31 +19,36 @@ from cortex.state import AssetState
 # ---------------------------------------------------------------------------
 
 
-def _route_after_extract(state: AssetState) -> str:
-    """After extract: retry on entity error, else go to SQL planner."""
-    if state.get("error"):
-        if state.get("extract_attempts", 0) < _MAX_EXTRACT_ATTEMPTS:
-            return "extract"       # retry with error context
-        return "clarify"           # genuinely unresolvable entity
-    return "plan_sql"
+def _route_after_classify(state: AssetState) -> str:
+    """off_topic goes straight to fallback; everything else attempts resolve+SQL."""
+    if state.get("request_type") == "off_topic":
+        return "clarify_or_fallback"
+    return "resolve_guard"
 
 
-def _route_after_validate(state: AssetState) -> str:
-    """After validate: loop back to planner on bad SQL, else execute."""
-    if state.get("sql_error"):
-        if state.get("plan_attempts", 0) < _MAX_SQL_ATTEMPTS:
-            return "plan_sql"      # retry with validation error context
-        return "clarify"
-    return "execute"
+def _route_on_next_action(state: AssetState) -> str:
+    """Route based on next_action set by resolve_guard or post_router."""
+    na = state.get("next_action", "fallback")
+    if na in ("clarify", "fallback"):
+        return "clarify_or_fallback"
+    return na  # "sql" or "answer"
 
 
-def _route_after_execute(state: AssetState) -> str:
-    """After execute: loop back to planner on DB error, else respond."""
-    if state.get("sql_error"):
-        if state.get("plan_attempts", 0) < _MAX_SQL_ATTEMPTS:
-            return "plan_sql"      # retry with execution error context
-        return "clarify"
-    return "respond"
+def _route_sql_agent(state: AssetState) -> str:
+    """If last message has tool calls, run ToolNode; otherwise read result."""
+    messages = state.get("messages") or []
+    if messages:
+        last = messages[-1]
+        if getattr(last, "tool_calls", None):
+            return "tool_node"
+    return "post_router"
+
+
+def _route_after_clarify_or_fallback(state: AssetState) -> str:
+    """Fallback is terminal; clarify loops back to resolve_guard with fresh input."""
+    if state.get("result_type") == "fallback":
+        return END
+    return "resolve_guard"
 
 
 # ---------------------------------------------------------------------------
@@ -56,46 +59,53 @@ def _route_after_execute(state: AssetState) -> str:
 def build_graph() -> StateGraph:
     graph = StateGraph(AssetState)
 
+    tool_node = ToolNode([execute_sql])
+
     graph.add_node("classify", classify_node)
-    graph.add_node("extract", extract_node)
-    graph.add_node("plan_sql", plan_sql_node)
-    graph.add_node("validate", validate_node)
-    graph.add_node("execute", execute_node)
-    graph.add_node("respond", response_node)
-    graph.add_node("clarify", clarify_node)
+    graph.add_node("resolve_guard", resolve_guard_node)
+    graph.add_node("sql_agent", sql_agent_node)
+    graph.add_node("tool_node", tool_node)
+    graph.add_node("post_router", post_router_node)
+    graph.add_node("answer", answer_node)
+    graph.add_node("clarify_or_fallback", clarify_or_fallback_node)
 
-    # classify → extract (all types — classification is now a hint, not a gate)
     graph.add_edge(START, "classify")
-    graph.add_edge("classify", "extract")
 
-    # extract → [retry | clarify | plan_sql]
     graph.add_conditional_edges(
-        "extract", _route_after_extract,
-        {"extract": "extract", "clarify": "clarify", "plan_sql": "plan_sql"},
+        "classify",
+        _route_after_classify,
+        {"resolve_guard": "resolve_guard", "clarify_or_fallback": "clarify_or_fallback"},
     )
 
-    # plan_sql → validate (always)
-    graph.add_edge("plan_sql", "validate")
-
-    # validate → [retry plan_sql | clarify | execute]
     graph.add_conditional_edges(
-        "validate", _route_after_validate,
-        {"plan_sql": "plan_sql", "clarify": "clarify", "execute": "execute"},
+        "resolve_guard",
+        _route_on_next_action,
+        {"sql": "sql_agent", "clarify_or_fallback": "clarify_or_fallback"},
     )
 
-    # execute → [retry plan_sql | clarify | respond]
     graph.add_conditional_edges(
-        "execute", _route_after_execute,
-        {"plan_sql": "plan_sql", "clarify": "clarify", "respond": "respond"},
+        "sql_agent",
+        _route_sql_agent,
+        {"tool_node": "tool_node", "post_router": "post_router"},
     )
 
-    graph.add_edge("respond", END)
-    graph.add_edge("clarify", END)
+    graph.add_edge("tool_node", "sql_agent")
+
+    graph.add_conditional_edges(
+        "post_router",
+        _route_on_next_action,
+        {"answer": "answer", "clarify_or_fallback": "clarify_or_fallback"},
+    )
+
+    graph.add_edge("answer", END)
+
+    graph.add_conditional_edges(
+        "clarify_or_fallback",
+        _route_after_clarify_or_fallback,
+        {"resolve_guard": "resolve_guard", END: END},
+    )
 
     return graph
 
 
-app_graph = build_graph().compile()
-
-_PNG_PATH = Path(__file__).parent.parent.parent / "cortex_flow.png"
-app_graph.get_graph().draw_mermaid_png(output_file_path=str(_PNG_PATH))
+app_graph = build_graph().compile(checkpointer=MemorySaver())

@@ -1,4 +1,5 @@
 import sys
+import uuid
 import warnings
 
 import pandas as pd
@@ -8,6 +9,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 sys.path.insert(0, "src")
 
+from langgraph.types import Command
+
 from cortex.config import PROPERTY_NAMES, VALID_QUARTERS, VALID_YEARS
 from cortex.graph import app_graph
 
@@ -15,6 +18,11 @@ st.set_page_config(page_title="Cortex – Asset Management", page_icon="🏢", l
 
 st.title("🏢 Cortex – Real Estate Asset Management")
 st.caption("Ask natural-language questions about your property portfolio.")
+
+# ── Session state initialisation ────────────────────────────────────────────
+st.session_state.setdefault("thread_id", str(uuid.uuid4()))
+st.session_state.setdefault("awaiting_clarification", False)
+st.session_state.setdefault("clarify_question", "")
 
 with st.sidebar:
     st.header("Portfolio")
@@ -33,17 +41,34 @@ with st.sidebar:
         "Show Building 120 profit trend across all quarters",
         "What are our mortgage costs for the portfolio?",
         "Compare Building 120 in Q1 2024 vs Q1 2025",
-        "What is the current value of Building 180?",
+        "What are the biggest expense categories in 2024?",
         "Give me details for Building 160 in Q4 2024",
     ]
     for ex in examples:
         if st.button(ex, key=ex, use_container_width=True):
             st.session_state["query_input"] = ex
+            st.session_state["thread_id"] = str(uuid.uuid4())
+            st.session_state["awaiting_clarification"] = False
+
+    st.divider()
+    if st.button("New conversation", use_container_width=True):
+        st.session_state["thread_id"] = str(uuid.uuid4())
+        st.session_state["awaiting_clarification"] = False
+        st.session_state["clarify_question"] = ""
+
+# ── Clarification prompt (shown when graph is waiting for more info) ─────────
+if st.session_state["awaiting_clarification"]:
+    st.info(st.session_state["clarify_question"])
+    placeholder = "Your answer…"
+    label = "Clarification"
+else:
+    placeholder = "Ask anything about your portfolio…"
+    label = "Your question"
 
 query = st.text_area(
-    "Your question",
+    label,
     value=st.session_state.get("query_input", ""),
-    placeholder="Ask anything about your portfolio…",
+    placeholder=placeholder,
     height=80,
     key="query_input",
 )
@@ -51,12 +76,46 @@ query = st.text_area(
 submitted = st.button("Ask", type="primary", disabled=not query.strip())
 
 if submitted and query.strip():
+    config = {"configurable": {"thread_id": st.session_state["thread_id"]}}
+
     with st.spinner("Running agents…"):
-        final = app_graph.invoke({"user_query": query.strip()})
+        if st.session_state["awaiting_clarification"]:
+            # Resume the paused graph with the user's clarification answer
+            final = app_graph.invoke(Command(resume=query.strip()), config=config)
+        else:
+            # Fresh question — start a new thread
+            st.session_state["thread_id"] = str(uuid.uuid4())
+            config = {"configurable": {"thread_id": st.session_state["thread_id"]}}
+            final = app_graph.invoke({"user_query": query.strip()}, config=config)
 
-    st.markdown(final.get("result", "No result returned."))
+        # Check if the graph is now paused at another interrupt
+        graph_state = app_graph.get_state(config)
+        if graph_state.next:
+            # Extract the clarification question
+            question = ""
+            for task in graph_state.tasks:
+                for intr in getattr(task, "interrupts", []):
+                    val = getattr(intr, "value", {}) or {}
+                    question = val.get("question", "")
+                    break
+            st.session_state["awaiting_clarification"] = True
+            st.session_state["clarify_question"] = question or "Could you clarify your question?"
+            st.rerun()
+        else:
+            st.session_state["awaiting_clarification"] = False
+            st.session_state["clarify_question"] = ""
 
-    # Show tabular result when the SQL returned multiple rows with numeric columns
+    result_type = final.get("result_type", "answer")
+    result_text = final.get("result", "No result returned.")
+
+    if result_type == "fallback":
+        st.warning(result_text)
+    elif result_type == "clarify":
+        st.info(result_text)
+    else:
+        st.markdown(result_text)
+
+    # Tabular result for multi-row SQL answers
     raw_data = final.get("raw_data") or {}
     rows = raw_data.get("rows", [])
     columns = raw_data.get("columns", [])
@@ -77,16 +136,19 @@ if submitted and query.strip():
             pass  # table display is best-effort
 
     with st.expander("Debug – pipeline state"):
-        st.markdown("**Generated SQL**")
-        st.code(final.get("sql_query", ""), language="sql")
+        tool_result = final.get("tool_result") or {}
+        if tool_result.get("cleaned_sql"):
+            st.markdown("**Generated SQL**")
+            st.code(tool_result["cleaned_sql"], language="sql")
         st.markdown("**State**")
         st.json(
             {
                 "request_type": final.get("request_type"),
+                "result_type": final.get("result_type"),
+                "error_bucket": final.get("error_bucket"),
                 "properties": final.get("properties"),
                 "timeframe": final.get("timeframe"),
-                "plan_attempts": final.get("plan_attempts"),
-                "error": final.get("error"),
-                "sql_error": final.get("sql_error"),
+                "unresolved_entities": final.get("unresolved_entities"),
+                "clarify_attempts": final.get("clarify_attempts"),
             }
         )

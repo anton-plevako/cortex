@@ -6,12 +6,9 @@ Exposes:
   SCHEMA_SUMMARY    — human-readable schema string injected into LLM prompts
 """
 
-import json
-
 import duckdb
-import pandas as pd
 
-from cortex.config import DATA_PATH, PROPERTIES_PATH
+from cortex.config import DATA_PATH
 
 # ---------------------------------------------------------------------------
 # Shared in-memory connection (created once at import time)
@@ -30,29 +27,9 @@ def get_connection() -> duckdb.DuckDBPyConnection:
 
 def _build_connection() -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect(database=":memory:")
-
-    # --- ledger view: the full P&L parquet file ---
     conn.execute(
         f"CREATE VIEW ledger AS SELECT * FROM read_parquet('{DATA_PATH.as_posix()}')"
     )
-
-    # --- property_metadata table: from properties.json ---
-    with open(PROPERTIES_PATH) as f:
-        raw: dict = json.load(f)
-
-    rows = [
-        {
-            "property_name": name,
-            "address": meta["address"],
-            "current_value": int(meta["current_value"]),
-            "purchase_price": int(meta["purchase_price"]),
-            "last_appraisal_date": meta["last_appraisal_date"],
-        }
-        for name, meta in raw.items()
-    ]
-    metadata_df = pd.DataFrame(rows)
-    conn.register("property_metadata", metadata_df)
-
     return conn
 
 
@@ -61,7 +38,7 @@ def _build_connection() -> duckdb.DuckDBPyConnection:
 # ---------------------------------------------------------------------------
 
 SCHEMA_SUMMARY = """\
-You have access to a DuckDB in-memory database with two tables:
+You have access to a DuckDB in-memory database with one table:
 
 TABLE: ledger
   Columns:
@@ -91,17 +68,6 @@ TABLE: ledger
       Include these rows when computing true portfolio-wide totals.
     - Revenue rows may have negative profit values (e.g. rent_discount_taxed = discount given).
     - Available data: full year 2024, Q1 2025 only (months 2025-M01 to 2025-M03).
-
-TABLE: property_metadata
-  Columns:
-    property_name        VARCHAR  — matches ledger.property_name
-    address              VARCHAR  — street address (e.g. "120 Harbor Boulevard")
-    current_value        BIGINT   — current appraised value in euros
-    purchase_price       BIGINT   — original purchase price in euros
-    last_appraisal_date  VARCHAR  — e.g. "2024-09-15"
-
-  Use this table for queries about property value, purchase price, or appraisal date.
-  JOIN on property_name to combine with P&L data.
 
 Time filter examples:
   year = '2024'         full year 2024
