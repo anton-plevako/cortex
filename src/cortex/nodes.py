@@ -18,7 +18,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
-from cortex.config import MODEL_NAME, VALID_QUARTERS, VALID_YEARS
+from cortex.config import MODEL_NAME, SQL_MODEL_NAME, VALID_QUARTERS, VALID_YEARS
 from cortex.prompts import (
     CLARIFY_SYSTEM,
     CLASSIFY_SYSTEM,
@@ -32,8 +32,8 @@ from cortex.tools import execute_sql, resolve_property
 
 load_dotenv()
 
-_llm = ChatOpenAI(model=MODEL_NAME, temperature=0)
-_sql_llm = _llm.bind_tools([execute_sql])
+_llm = ChatOpenAI(model=MODEL_NAME, temperature=0.1)
+_sql_llm = ChatOpenAI(model=SQL_MODEL_NAME, temperature=0.1).bind_tools([execute_sql])
 
 MAX_CLARIFY_ATTEMPTS = 2
 
@@ -130,7 +130,7 @@ def classify_node(state: AssetState) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def resolve_guard_node(state: AssetState) -> dict:
+def parse_and_validate_node(state: AssetState) -> dict:
     # Step 1 — LLM extraction
     user_content = f"Request type: {state['request_type']}\nQuery: {state['user_query']}"
     result: _Extraction = _llm.with_structured_output(_Extraction).invoke(  # type: ignore[assignment]
@@ -242,7 +242,7 @@ def sql_agent_node(state: AssetState) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def post_router_node(state: AssetState) -> dict:
+def handle_sql_result_node(state: AssetState) -> dict:
     messages = state.get("messages") or []
 
     # Find the last ToolMessage

@@ -4,6 +4,7 @@ import pandas as pd
 
 DATA_PATH = Path(__file__).parent.parent.parent / "data" / "cortex.parquet"
 MODEL_NAME = "gpt-4o"
+SQL_MODEL_NAME = "gpt-5.2"
 
 
 def _load_portfolio_metadata() -> tuple[list[str], set[str], set[str]]:
