@@ -12,7 +12,8 @@ class Timeframe(TypedDict, total=False):
 class AssetState(TypedDict, total=False):
     # ── Input ─────────────────────────────────────────────────────────────────
     user_query: str
-    user_query_original: str  # set at first classify; updated on CLARIFY_PROPERTY resolution
+    user_query_original: str   # set at first classify; never overwritten after that
+    user_query_working: str    # mutable working copy; updated by clarify_apply after each clarify loop
 
     # ── LLM tool-calling loop (sql_agent ↔ ToolNode) ──────────────────────────
     messages: Annotated[list, add_messages]

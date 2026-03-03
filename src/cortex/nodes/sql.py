@@ -14,7 +14,7 @@ def _build_sql_intent(state: AssetState) -> str:
     """Build the human message content for the sql_agent."""
     tf = state.get("timeframe") or {}
     lines = [
-        f"User query: {state['user_query']}",
+        f"User query: {state.get('user_query_working') or state['user_query']}",
         f"Intent: {state.get('request_type', 'general')}",
         f"Resolved properties: {state.get('properties', [])}",
         f"Timeframe: year={tf.get('year')}, quarter={tf.get('quarter')}, month={tf.get('month')}",

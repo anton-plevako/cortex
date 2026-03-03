@@ -28,10 +28,12 @@ class _Classification(BaseModel):
 
 
 def classify_node(state: AssetState) -> dict:
+    # Use the mutable working copy if available (set after clarify loops); fall back to raw input
+    query_text = state.get("user_query_working") or state["user_query"]
     result: _Classification = _llm.with_structured_output(_Classification).invoke(  # type: ignore[assignment]
         [
             {"role": "system", "content": UNDERSTAND_SYSTEM},
-            {"role": "user", "content": state["user_query"]},
+            {"role": "user", "content": query_text},
         ]
     )
     error_bucket = "FALLBACK_OFF_TOPIC" if result.request_type == "off_topic" else ""
@@ -45,7 +47,8 @@ def classify_node(state: AssetState) -> dict:
             "month": result.month,
         },
     }
-    # Preserve original query on first call only — never overwritten on re-classify
+    # On first call: pin original query and seed working copy — never overwritten after that
     if not state.get("user_query_original"):
         out["user_query_original"] = state["user_query"]
+        out["user_query_working"] = state["user_query"]
     return out

@@ -4,16 +4,22 @@ from langgraph.prebuilt import ToolNode
 
 from cortex.graph_routes import (
     route_after_classify,
-    route_clarify_agent,
+    route_clarify_apply,
+    route_clarify_entry,
+    route_clarify_policy,
     route_on_next_action,
     route_sql_agent,
 )
 from cortex.nodes import (
     answer_node,
-    clarify_agent_node,
+    clarify_apply_node,
+    clarify_entry_node,
+    clarify_fallback_node,
+    clarify_interrupt_node,
+    clarify_policy_node,
+    clarify_question_node,
     classify_node,
     handle_sql_result_node,
-    human_interrupt_node,
     sql_agent_node,
     validate_and_resolve_node,
 )
@@ -24,27 +30,35 @@ from cortex.tools import execute_sql
 def build_graph() -> StateGraph:
     graph = StateGraph(AssetState)
 
+    # ── Core pipeline nodes ───────────────────────────────────────────────────
     graph.add_node("classify", classify_node)
     graph.add_node("validate_and_resolve", validate_and_resolve_node)
     graph.add_node("sql_agent", sql_agent_node)
     graph.add_node("sql_executor", ToolNode([execute_sql]))
     graph.add_node("handle_sql_result", handle_sql_result_node)
     graph.add_node("answer", answer_node)
-    graph.add_node("clarify_agent", clarify_agent_node)
-    graph.add_node("human_interrupt", human_interrupt_node)
 
+    # ── Clarify hub nodes ─────────────────────────────────────────────────────
+    graph.add_node("clarify_entry", clarify_entry_node)
+    graph.add_node("clarify_question", clarify_question_node)
+    graph.add_node("clarify_interrupt", clarify_interrupt_node)
+    graph.add_node("clarify_policy", clarify_policy_node)
+    graph.add_node("clarify_apply", clarify_apply_node)
+    graph.add_node("clarify_fallback", clarify_fallback_node)
+
+    # ── Core pipeline edges ───────────────────────────────────────────────────
     graph.add_edge(START, "classify")
 
     graph.add_conditional_edges(
         "classify",
         route_after_classify,
-        {"validate_and_resolve": "validate_and_resolve", "clarify_agent": "clarify_agent"},
+        {"validate_and_resolve": "validate_and_resolve", "clarify_entry": "clarify_entry"},
     )
 
     graph.add_conditional_edges(
         "validate_and_resolve",
         route_on_next_action,
-        {"sql": "sql_agent", "clarify_agent": "clarify_agent"},
+        {"sql": "sql_agent", "clarify_entry": "clarify_entry"},
     )
 
     graph.add_conditional_edges(
@@ -58,23 +72,49 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges(
         "handle_sql_result",
         route_on_next_action,
-        {"answer": "answer", "clarify_agent": "clarify_agent"},
+        {"answer": "answer", "clarify_entry": "clarify_entry"},
     )
 
     graph.add_edge("answer", END)
 
+    # ── Clarify hub edges ─────────────────────────────────────────────────────
     graph.add_conditional_edges(
-        "clarify_agent",
-        route_clarify_agent,
+        "clarify_entry",
+        route_clarify_entry,
         {
-            "human_interrupt": "human_interrupt",
-            "classify": "classify",
-            "validate_and_resolve": "validate_and_resolve",  # CLARIFY_PROPERTY shortcut
-            END: END,
+            "clarify_question": "clarify_question",
+            "clarify_policy": "clarify_policy",
+            "clarify_interrupt": "clarify_interrupt",  # staged question — bypass regeneration
+            "clarify_fallback": "clarify_fallback",
         },
     )
 
-    graph.add_edge("human_interrupt", "clarify_agent")
+    # question → interrupt (always); interrupt → entry (always, loops back)
+    graph.add_edge("clarify_question", "clarify_interrupt")
+    graph.add_edge("clarify_interrupt", "clarify_entry")
+
+    graph.add_conditional_edges(
+        "clarify_policy",
+        route_clarify_policy,
+        {
+            "clarify_interrupt": "clarify_interrupt",
+            "clarify_apply": "clarify_apply",
+            "clarify_fallback": "clarify_fallback",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "clarify_apply",
+        route_clarify_apply,
+        {
+            "validate_and_resolve": "validate_and_resolve",
+            "classify": "classify",
+            "clarify_interrupt": "clarify_interrupt",
+            "clarify_fallback": "clarify_fallback",
+        },
+    )
+
+    graph.add_edge("clarify_fallback", END)
 
     return graph
 
