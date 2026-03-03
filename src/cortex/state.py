@@ -25,13 +25,17 @@ class AssetState(TypedDict, total=False):
     # ── Routing signals — set by resolve_guard and post_router ────────────────
     next_action: str              # "sql" | "clarify" | "fallback" | "answer"
     error_bucket: str             # "CLARIFY_PROPERTY" | "CLARIFY_QUERY" |
-                                  # "FALLBACK_OFF_TOPIC" | "FALLBACK_NO_DATA" | ""
+                                  # "FALLBACK_OFF_TOPIC" | "FALLBACK_NO_DATA" |
+                                  # "FALLBACK_EXEC_ERROR" | ""
 
     # ── SQL execution output — written by post_router after reading ToolMessage
     tool_result: dict             # {status, error_message, rows, row_count, columns, cleaned_sql}
 
     # ── Clarification loop control ─────────────────────────────────────────────
-    clarify_attempts: int         # incremented by clarify_or_fallback on each interrupt
+    clarify_attempts: int         # incremented on each interrupt
+    pending_question: str | None  # set by clarify_agent before interrupt; replay-safety guard
+    last_clarify_question: str | None  # question asked last turn
+    last_clarify_answer: str | None    # user's answer last turn
 
     # ── Output ────────────────────────────────────────────────────────────────
     result: str                   # final response text shown to user

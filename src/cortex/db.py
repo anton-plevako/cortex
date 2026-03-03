@@ -46,13 +46,28 @@ TABLE: ledger
     property_name    VARCHAR  — one of: Building 17, Building 120, Building 140,
                                 Building 160, Building 180
                                 NULL = entity-level costs (mortgage, management fees, etc.)
-    tenant_name      VARCHAR
+    tenant_name      VARCHAR  — Tenant 1 … Tenant 18 (NULL on entity-level rows)
     ledger_type      VARCHAR  — "revenue" | "expenses"
     ledger_group     VARCHAR  — rental_income | sales_discounts | general_expenses |
                                 management_fees | taxes_and_insurances
-    ledger_category  VARCHAR  — e.g. revenue_rent_taxed, interest_mortgage,
-                                proceeds_parking_taxed, insurance_in_general,
-                                rent_discount_taxed, asset_management_fees
+    ledger_category  VARCHAR  — all values, grouped by ledger_group:
+      rental_income:    revenue_rent_taxed, proceeds_rent_untaxed,
+                        proceeds_parking_taxed, proceeds_parking_untaxed,
+                        vat_compensation
+      sales_discounts:  rent_discount_taxed, rent_discount_untaxed
+      general_expenses: interest_mortgage, bank_charges, financial_expenses,
+                        legal_advice, other_consultancy_costs, research_and_information,
+                        other_general_expenses, administration_costs, non_reclaimable_vat,
+                        non_reclaimable_sc, maintenance_owner, permits_and_fees,
+                        accountant_costs, broker's_fees, expense_return
+      management_fees:  asset_management_fees, property_management_fees,
+                        other_management_fees, directors_fee, success_fees
+      taxes_and_insurances: real_estate_taxes, insurance_in_general
+
+      Pairing rules — always include BOTH when querying these concepts:
+        rental income  : revenue_rent_taxed + proceeds_rent_untaxed
+        parking income : proceeds_parking_taxed + proceeds_parking_untaxed
+        rent discounts : rent_discount_taxed + rent_discount_untaxed
     ledger_code      VARCHAR
     ledger_description VARCHAR
     profit           DOUBLE   — single sign-encoded column:
@@ -71,7 +86,7 @@ TABLE: ledger
 
 Time filter examples:
   year = '2024'         full year 2024
-  quarter = '2025-Q1'   Q1 2025 (Jan–Mar)
+  quarter = '2025-Q1'   Q1 2025 (Jan-Mar)
   month = '2024-M10'    October 2024
   year = '2025'         same as quarter = '2025-Q1' (all available 2025 data)
 """

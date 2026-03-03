@@ -8,6 +8,7 @@ execute_sql      — validate + execute a DuckDB SELECT query; returns structure
 
 import difflib
 import json
+import re
 
 from langchain_core.tools import tool
 
@@ -20,13 +21,48 @@ from cortex.db import get_connection
 
 _FORBIDDEN_SQL = ("insert", "update", "delete", "drop", "create", "alter", "copy", "export")
 
+# Maps building number string → canonical name, derived from PROPERTY_NAMES.
+# e.g. {"17": "Building 17", "120": "Building 120", ...}
+_NUMBER_TO_PROPERTY: dict[str, str] = {
+    m.group(): p
+    for p in PROPERTY_NAMES
+    if (m := re.search(r"\d+", p))
+}
+
+_AVAILABLE = ", ".join(PROPERTY_NAMES)
+
 
 def resolve_property(name: str) -> str:
     """
-    Return the canonical property name closest to `name`, or raise ValueError.
-    Matches against building names only (e.g. 'Building 120', '120', 'the 17 building').
+    Return the canonical property name for `name`, or raise ValueError.
+
+    Stage 1 (numeric inputs): extract all digit runs from `name`.
+      - More than one number found → raise (ambiguous input, e.g. "120 and 17").
+      - Exactly one number found → look up in _NUMBER_TO_PROPERTY.
+          Match  → return canonical name.
+          No match → raise immediately. No fuzzy fallback for numeric inputs,
+                     so "Building 10" never silently maps to "Building 180".
+    Stage 2 (non-numeric / descriptive inputs): difflib fuzzy matching, then
+      substring containment check — same logic as before.
     """
     normalised = name.strip().lower()
+
+    # Stage 1: numeric path
+    nums = re.findall(r"\d+", normalised)
+    if nums:
+        if len(nums) != 1:
+            raise ValueError(
+                f"Ambiguous property reference '{name}' (multiple numbers found). "
+                f"Available: {_AVAILABLE}"
+            )
+        canonical = _NUMBER_TO_PROPERTY.get(nums[0])
+        if canonical:
+            return canonical
+        raise ValueError(
+            f"Unknown property '{name}'. Available: {_AVAILABLE}"
+        )
+
+    # Stage 2: descriptive / non-numeric — fuzzy match
     candidates: dict[str, str] = {p.lower(): p for p in PROPERTY_NAMES}
 
     matches = difflib.get_close_matches(normalised, candidates.keys(), n=1, cutoff=0.4)
@@ -38,7 +74,7 @@ def resolve_property(name: str) -> str:
             return canonical
 
     raise ValueError(
-        f"Unknown property '{name}'. Available: {', '.join(PROPERTY_NAMES)}"
+        f"Unknown property '{name}'. Available: {_AVAILABLE}"
     )
 
 
@@ -58,7 +94,7 @@ def execute_sql(sql: str) -> str:
       rows         : list of row dicts (empty on error)
       row_count    : number of rows returned
       columns      : list of column names
-      cleaned_sql  : the SQL actually executed (may have LIMIT 200 appended)
+      cleaned_sql  : the SQL actually executed (trailing semicolons stripped)
 
     If status is 'bad_sql', fix the SQL and call this tool again.
     Do not call other tools before this one succeeds with status='ok' or a non-bad_sql status.
@@ -83,11 +119,7 @@ def execute_sql(sql: str) -> str:
                 "rows": [], "row_count": 0, "columns": [], "cleaned_sql": sql,
             })
 
-    cleaned_sql = (
-        stripped.rstrip(";") + "\nLIMIT 200"
-        if "limit" not in sql_lower
-        else stripped
-    )
+    cleaned_sql = stripped.rstrip(";")
 
     # --- Execution -----------------------------------------------------------
 
