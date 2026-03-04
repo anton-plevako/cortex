@@ -1,7 +1,6 @@
-````md
 # Cortex — Real Estate Asset Management Assistant
 
-A conversational AI assistant for querying a commercial property portfolio. You ask questions in plain English, it returns precise answers backed by actual data.
+A conversational AI assistant for querying a commercial property portfolio. Ask questions in plain English, get precise answers backed by actual data.
 
 Built with LangGraph, GPT-4o / GPT-5.2, DuckDB, and Streamlit.
 
@@ -37,7 +36,7 @@ uv run streamlit run app.py
 
 ## What it does
 
-The system answers natural-language questions about a portfolio of commercial properties. Some examples of what works:
+The system answers natural-language questions about a portfolio of commercial properties. Some examples:
 
 - "Which property made the most money in 2024?"
 - "Compare Building 120 and Building 17 for Q4 2024."
@@ -45,27 +44,27 @@ The system answers natural-language questions about a portfolio of commercial pr
 - "Show me Building 160's profit trend across all quarters."
 - "How much parking revenue did we earn in 2024?"
 
-Under the hood, each question gets translated into a DuckDB SQL query, executed against the ledger, and narrated back in plain language. When a query is too vague or references an unknown property, the system asks a clarifying question rather than guessing.
+Each question is translated into a DuckDB SQL query, executed against the ledger, and narrated back in plain language. When a query is too vague or references an unknown property, the system asks a clarifying question rather than guessing.
 
-The dataset is `data/cortex.parquet` — a P&L ledger for a single entity (PropCo) with 5 properties, 18 tenants, 29 ledger categories, and 15 months of data (2024 full year + Q1 2025).
+The dataset is `data/cortex.parquet` — a P&L ledger for PropCo with 5 properties, 18 tenants, 29 ledger categories, and 15 months of data (2024 full year + Q1 2025).
 
 ---
 
 ## Architecture
 
-The core idea: all numbers come from SQL execution, not from the LLM. GPT handles language (intent, SQL drafting, narration), and DuckDB is the source of truth.
+The core idea: all numbers come from SQL execution, not from the LLM. GPT handles language (intent, SQL drafting, narration); DuckDB is the source of truth.
 
 High-level flow:
 
-- `classify` (LLM) extracts `request_type`, `timeframe`, and `raw_properties` (may be imperfect)
+- `classify` (LLM) extracts `request_type`, `timeframe`, and `raw_properties`
 - `validate_and_resolve` (code) resolves properties deterministically and runs guard checks:
   - `unclear` → `CLARIFY_QUERY`
   - invalid timeframe → `FALLBACK_NO_DATA` (terminal)
   - unresolved property names → `CLARIFY_PROPERTY`
   - otherwise routes to SQL
-- `sql_agent` ↔ `sql_executor` loops until `execute_sql` returns success or a terminal failure status
+- `sql_agent` ↔ `sql_executor` loops until `execute_sql` returns success or a terminal failure
 - `handle_sql_result` decides whether to answer or route into the clarify hub
-- Clarify hub handles both clarification (`CLARIFY_*`) and terminal failures (`FALLBACK_*`) via `interrupt()` + `MemorySaver` resume
+- Clarify hub handles clarification (`CLARIFY_*`) and terminal failures (`FALLBACK_*`) via `interrupt()` + `MemorySaver` resume
 
 ### File layout
 
@@ -88,51 +87,54 @@ data/cortex.parquet
 
 ## LangGraph pipeline
 
-Each node has a single job. Routing is driven by state (`next_action`, `error_bucket`, etc.), using small route functions.
+![LangGraph flow](./cortex_flow.png)
+
+Each node has a single job. Routing is driven by state (`next_action`, `error_bucket`, etc.).
+
+**Main path:**
 
 - `classify` (LLM) — classify intent + extract raw slots (property mentions, timeframe, etc.)
-- `validate_and_resolve` (code) — resolves `raw_properties` → `properties`, validates timeframe, and sets `next_action` + `error_bucket`
+- `validate_and_resolve` (code) — resolves `raw_properties` → `properties`, validates timeframe, sets `next_action` + `error_bucket`
 - `sql_agent` (LLM) — generate DuckDB `SELECT` + tool-call `execute_sql`
 - `sql_executor` (ToolNode) — executes `execute_sql`
 - `handle_sql_result` (code) — interprets tool output, sets `next_action` (answer vs clarify)
-- `answer` (LLM) — narrates the final result (uses `user_query_original` for display)
+- `answer` (LLM) — narrates the final result
 
-Clarification / error handling is a small hub (6 nodes):
+**Clarify hub (6 nodes):**
 
 - `clarify_entry` (code) — dispatches based on `error_bucket`, attempts, and whether a question is already staged
-- `clarify_question` (LLM) — generates the first clarification question for `CLARIFY_*`
-- `clarify_interrupt` (`interrupt`) — pauses + stores Q/A + resets messages so SQL restarts clean
+- `clarify_question` (LLM) — generates the clarification question
+- `clarify_interrupt` (`interrupt`) — pauses, stores Q/A, resets messages
 - `clarify_policy` (LLM, structured output) — decides: ask again / apply / fallback
-- `clarify_apply` (code) — applies the answer (patches `user_query_working`, or sets `raw_properties`) then routes back to `validate_and_resolve` or `classify`
+- `clarify_apply` (code) — patches `user_query_working` or `raw_properties`, routes back to `validate_and_resolve` or `classify`
 - `clarify_fallback` (LLM) — terminal explanation for `FALLBACK_*` or max attempts
 
-Loops:
+**Loops:**
 
-- `sql_agent` ↔ `sql_executor` loops until SQL is terminal (`ok` / `no_data` / `exec_error`, etc.)
-- Clarify hub loops through interrupt/resume until resolved or attempts are exhausted (uses `pending_question` to avoid regenerating questions on reruns). Interrupt/resume behavior is the standard LangGraph pattern.
-- `messages` is reset via `Overwrite([])` to bypass the reducer and start clean after clarification.
+- `sql_agent` ↔ `sql_executor` until SQL is terminal (`ok` / `no_data` / `exec_error`, etc.)
+- Clarify hub loops through interrupt/resume until resolved or attempts are exhausted. `pending_question` prevents regenerating questions on reruns. `messages` is reset via `Overwrite([])` after each human answer so the SQL agent restarts clean.
 
 ---
 
 ## Shared state
 
-All nodes read and write a single `AssetState` `TypedDict`:
+All nodes read and write a single `AssetState` TypedDict:
 
 ```text
 user_query              # original user input (kept as-is)
 user_query_original     # immutable copy used for display/narration
-user_query_working      # mutable working copy used for re-classify / SQL after clarification
+user_query_working      # mutable working copy for re-classify / SQL after clarification
 
 request_type            # "pnl" | "comparison" | "details" | "general" | "unclear" | "off_topic"
-raw_properties          # extracted property strings (may include unresolved); can be overwritten after CLARIFY_PROPERTY
+raw_properties          # extracted property strings (may include unresolved)
 properties              # canonical property names (written by validate_and_resolve)
 
 timeframe               # {year, quarter, month}
 
-next_action             # routing signal used across nodes:
+next_action             # routing signal:
                         # core: "sql" | "answer" | "clarify"
-                        # clarify hub internal: "question" | "policy" | "interrupt" | "apply" |
-                        #                      "validate" | "classify" | "fallback"
+                        # clarify hub: "question" | "policy" | "interrupt" | "apply" |
+                        #              "validate" | "classify" | "fallback"
 
 error_bucket            # "CLARIFY_PROPERTY" | "CLARIFY_QUERY" |
                         # "FALLBACK_OFF_TOPIC" | "FALLBACK_NO_DATA" | "FALLBACK_EXEC_ERROR" | ""
@@ -141,10 +143,10 @@ tool_result             # {status, error_message, rows, row_count, columns, clea
 result                  # final text shown to user
 result_type             # "answer" | "clarify" | "fallback" (Streamlit display)
 
-messages                # message history for the sql_agent <-> tool loop (reset after interrupt)
-pending_question        # staged question to surface via interrupt() (replay-safe)
+messages                # message history for sql_agent ↔ tool loop (reset after interrupt)
+pending_question        # staged question for interrupt() (replay-safe)
 last_clarify_question   # last question shown to the user
-last_clarify_answer     # user’s last answer
+last_clarify_answer     # user's last answer
 clarify_attempts        # incremented on each interrupt; gates MAX_CLARIFY_ATTEMPTS
 ```
 
@@ -152,26 +154,26 @@ clarify_attempts        # incremented on each interrupt; gates MAX_CLARIFY_ATTEM
 
 ## Design decisions
 
-- **Schema injection vs. RAG:** The schema is small (one table), but the data has quirks so I inject the full schema + rules into the SQL prompt so every query has the same context and there are no retrieval misses.
+- **Schema injection vs. RAG:** The schema is small but has quirks, so I inject the full schema + rules into every SQL prompt. No retrieval misses, consistent context.
 
-- **Structured output:** For anything that drives control flow (intent, extracted slots, clarify decisions), I use `with_structured_output(PydanticModel)` so state stays typed and routing stays deterministic.
+- **Structured output:** Control-flow decisions (intent, slots, clarify policy) use `with_structured_output(PydanticModel)` so state stays typed and routing is deterministic.
 
-- **MemorySaver + interrupt:** Clarifications use LangGraph `interrupt()` and Streamlit resumes with `Command(resume=answer)` on the same `thread_id`, so the conversation continues instead of restarting.
+- **MemorySaver + interrupt:** Clarifications use LangGraph `interrupt()`. Streamlit resumes with `Command(resume=answer)` on the same `thread_id` so the conversation continues instead of restarting.
 
-- **LLM vs code split:** LLMs handle language (intent, SQL drafting, narration). Code handles correctness (validation, execution, retries, routing).
+- **LLM vs code split:** LLMs handle language (intent, SQL, narration). Code handles correctness (validation, execution, retries, routing).
 
-- **Centralized error handling:** Errors are routed into a single clarify hub. I refactored it from a monolith into smaller nodes to fix an infinite clarify loop and make resume/replay safe.
+- **Centralized error handling:** All errors route into a single clarify hub — easier to reason about and replay-safe.
 
 ---
 
 ## Challenges & how I solved them
 
-- **Tool-per-intent didn’t scale:** Started with multiple rigid tools (`get_property_pnl`, `compare_properties`, etc.). It broke quickly on novel questions (rankings, trends, category breakdowns). Switched to a single SQL-generating agent + one tool: `execute_sql`.
+- **Tool-per-intent didn't scale:** Multiple rigid tools (`get_property_pnl`, `compare_properties`, etc.) broke on novel questions. Replaced with a single SQL-generating agent + one tool: `execute_sql`.
 
-- **SQL correctness required data-specific rules:** The ledger has quirks (sign-encoded profit, entity-level costs with `NULL property_name`, etc.). I explored the data and wrote an explicit schema summary + SQL conventions into the SQL agent prompt, with examples. The agent also retries when `execute_sql` returns `bad_sql`.
-- **Property matching could silently produce wrong answers:** Fuzzy matching on numeric names can be dangerous (“10” looking like “180”) in the initial approach. I fixed this with deterministic numeric-first resolution and only using fuzzy matching for non-numeric inputs.
+- **SQL correctness required explicit conventions:** The ledger has quirks (sign-encoded profit, entity-level costs with `NULL property_name`). I encoded an explicit schema summary + SQL rules + examples directly into the SQL agent prompt. The agent also retries on `bad_sql`.
 
-- **Clarification + error handling loops were tricky:** I bucket failures into `CLARIFY_PROPERTY`, `CLARIFY_QUERY`, and terminal `FALLBACK_*` cases. `validate_and_resolve` sets these buckets deterministically (e.g. invalid time → `FALLBACK_NO_DATA`, unresolved names → `CLARIFY_PROPERTY`). I originally hit an infinite clarify-loop edge case, so I refactored the logic into a small clarify hub (`clarify_entry → clarify_question → interrupt → clarify_policy → clarify_apply/clarify_fallback`). The hub stages questions via `pending_question` to stay replay-safe on reruns, resets `messages` after a human answer with `Overwrite([])` so the SQL agent restarts clean, and applies the result deterministically (patch `user_query_working` / override `raw_properties`, or fall back).
+- **Property matching could silently produce wrong answers:** Fuzzy matching on numeric names is dangerous ("10" → "180"). Fixed with deterministic numeric-first resolution; fuzzy matching only applies to non-numeric inputs.
 
-- **Streamlit + interrupt/resume integration:** Streamlit reruns the script, so I had to be careful with session state and stable `thread_id`. The graph uses `MemorySaver`, and the UI resumes with `Command(resume=answer)` so the conversation continues instead of restarting.
-````
+- **Clarification loops were hard to get right:** Failures bucket into `CLARIFY_PROPERTY`, `CLARIFY_QUERY`, and terminal `FALLBACK_*`. An infinite-loop edge case led me to refactor into discrete nodes (`clarify_entry → clarify_question → interrupt → clarify_policy → clarify_apply/clarify_fallback`). Questions are staged via `pending_question` (replay-safe), messages reset after each answer, and results applied deterministically.
+
+- **Streamlit + interrupt/resume:** Streamlit reruns the full script on each interaction. The graph uses `MemorySaver` with a stable `thread_id`; the UI resumes with `Command(resume=answer)` rather than restarting.
