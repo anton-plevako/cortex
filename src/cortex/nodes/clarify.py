@@ -269,7 +269,9 @@ def clarify_fallback_node(state: AssetState) -> dict[str, Any]:
     try:
         message = str(invoke_with_retry(lambda: _llm.invoke(messages)).content)  # type: ignore[union-attr]
     except Exception as e:
-        message = "I'm sorry, I wasn't able to process that request. Please try rephrasing your question."
+        prior_detail = state.get("error_detail") or ""
+        detail = prior_detail or sanitize_error(e)
+        message = f"I'm sorry, I wasn't able to process that request. ({detail})"
         return {
             "result": message,
             "result_type": "fallback",
