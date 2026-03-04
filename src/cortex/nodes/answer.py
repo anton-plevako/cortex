@@ -5,7 +5,7 @@ import json
 from cortex.prompts import RESPONSE_SYSTEM
 from cortex.state import AssetState
 
-from ._shared import _llm
+from ._shared import _llm, invoke_with_retry, sanitize_error
 
 
 def answer_node(state: AssetState) -> dict:
@@ -21,12 +21,21 @@ def answer_node(state: AssetState) -> dict:
         f"Query result (JSON):\n"
         f"{json.dumps(tool_result.get('rows', []), indent=2, default=str)}"
     )
-    response = _llm.invoke(
-        [
-            {"role": "system", "content": RESPONSE_SYSTEM},
-            {"role": "user", "content": user_message},
-        ]
-    )
+    messages = [
+        {"role": "system", "content": RESPONSE_SYSTEM},
+        {"role": "user", "content": user_message},
+    ]
+    try:
+        response = invoke_with_retry(lambda: _llm.invoke(messages))
+    except Exception as e:
+        return {
+            "result": "I retrieved the data but encountered an error generating the response. Please try again.",
+            "result_type": "fallback",
+            "raw_data": {},
+            "error_bucket": "FALLBACK_EXEC_ERROR",
+            "error_source": "answer_node",
+            "error_detail": sanitize_error(e),
+        }
     rows = tool_result.get("rows", [])
     columns = tool_result.get("columns", [])
     return {

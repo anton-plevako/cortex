@@ -2,12 +2,12 @@
 
 import json
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from cortex.prompts import SQL_AGENT_SYSTEM
 from cortex.state import AssetState
 
-from ._shared import _sql_llm
+from ._shared import _sql_llm, invoke_with_retry, sanitize_error
 
 
 def _build_sql_intent(state: AssetState) -> str:
@@ -30,9 +30,18 @@ def sql_agent_node(state: AssetState) -> dict:
     else:
         messages = list(existing_messages)
 
-    response = _sql_llm.invoke(
-        [SystemMessage(content=SQL_AGENT_SYSTEM)] + messages
-    )
+    invoke_messages = [SystemMessage(content=SQL_AGENT_SYSTEM)] + messages
+    try:
+        response = invoke_with_retry(lambda: _sql_llm.invoke(invoke_messages))
+    except Exception as e:
+        # AIMessage with no tool_calls routes via route_sql_agent → handle_sql_result → FALLBACK_EXEC_ERROR.
+        # Also set error fields directly so state is explicit even before handle_sql_result runs.
+        return {
+            "messages": [AIMessage(content="LLM error — cannot generate SQL.")],
+            "error_bucket": "FALLBACK_EXEC_ERROR",
+            "error_source": "sql_agent_node",
+            "error_detail": sanitize_error(e),
+        }
     return {"messages": [response]}
 
 

@@ -40,7 +40,7 @@ The system answers natural-language questions about a portfolio of commercial pr
 
 - "Which property made the most money in 2024?"
 - "Compare Building 120 and Building 17 for Q4 2024."
-- "What are our biggest expense categories this year?"
+- "What are our biggest expense categories in 2024?"
 - "Show me Building 160's profit trend across all quarters."
 - "How much parking revenue did we earn in 2024?"
 
@@ -141,13 +141,16 @@ error_bucket            # "CLARIFY_PROPERTY" | "CLARIFY_QUERY" |
 
 tool_result             # {status, error_message, rows, row_count, columns, cleaned_sql}
 result                  # final text shown to user
-result_type             # "answer" | "clarify" | "fallback" (Streamlit display)
+result_type             # "answer" | "fallback" (Streamlit display)
 
 messages                # message history for sql_agent ↔ tool loop (reset after interrupt)
 pending_question        # staged question for interrupt() (replay-safe)
 last_clarify_question   # last question shown to the user
 last_clarify_answer     # user's last answer
 clarify_attempts        # incremented on each interrupt; gates MAX_CLARIFY_ATTEMPTS
+
+error_source            # node name where LLM exception occurred (empty on success)
+error_detail            # sanitized error: type + first line, no keys/SQL/PII
 ```
 
 ---
@@ -162,7 +165,7 @@ clarify_attempts        # incremented on each interrupt; gates MAX_CLARIFY_ATTEM
 
 - **LLM vs code split:** LLMs handle language (intent, SQL, narration). Code handles correctness (validation, execution, retries, routing).
 
-- **Centralized error handling:** All errors route into a single clarify hub — easier to reason about and replay-safe.
+- **Error handling — two layers:** At the node level, all LLM calls are wrapped with a retry helper that retries only on transient errors (rate limits, timeouts, 5xx). Non-transient failures (schema mismatch, bad request) surface immediately. On exhaustion, nodes return a deterministic fallback state rather than raising. At the graph level, all failure paths route into a single clarify hub, which handles both clarification flows and terminal fallbacks — the graph always ends cleanly with a user-facing message. Diagnostic fields (`error_source`, `error_detail`) are stored in state for tracing.
 
 ---
 

@@ -42,5 +42,9 @@ class AssetState(TypedDict, total=False):
 
     # ── Output ────────────────────────────────────────────────────────────────
     result: str                   # final response text shown to user
-    result_type: str              # "answer" | "clarify" | "fallback" — Streamlit display logic
+    result_type: str              # "answer" | "fallback" — Streamlit display logic
     raw_data: dict                # {rows, columns} for Streamlit table display
+
+    # ── Error diagnostics — set on LLM failure, cleared by classify_node on success ──
+    error_source: str             # node name where exception occurred, e.g. "classify_node"
+    error_detail: str             # sanitized: type(e).__name__ + first line, max ~100 chars

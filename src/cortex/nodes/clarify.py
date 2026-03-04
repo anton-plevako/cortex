@@ -26,7 +26,7 @@ from cortex.prompts import (
 from cortex.state import AssetState
 from cortex.tools import resolve_property
 
-from ._shared import MAX_CLARIFY_ATTEMPTS, _llm
+from ._shared import MAX_CLARIFY_ATTEMPTS, _llm, invoke_with_retry, sanitize_error
 
 
 class ClarifyDecision(BaseModel):
@@ -106,7 +106,11 @@ def clarify_question_node(state: AssetState) -> dict[str, Any]:
         {"role": "system", "content": CLARIFY_QUESTION_SYSTEM},
         {"role": "user", "content": "\n".join(lines)},
     ]
-    question = str(_llm.invoke(messages).content)  # type: ignore[arg-type]
+    try:
+        question = str(invoke_with_retry(lambda: _llm.invoke(messages)).content)  # type: ignore[union-attr]
+    except Exception as e:
+        question = "Could you clarify your request?"
+        return {"pending_question": question, "error_source": "clarify_question_node", "error_detail": sanitize_error(e)}
     return {"pending_question": question}
 
 
@@ -155,7 +159,12 @@ def clarify_policy_node(state: AssetState) -> dict[str, Any]:
         {"role": "system", "content": CLARIFY_AGENT_SYSTEM},
         {"role": "user", "content": "\n".join(lines)},
     ]
-    response: ClarifyDecision = _llm.with_structured_output(ClarifyDecision).invoke(messages)  # type: ignore[assignment]
+    try:
+        response: ClarifyDecision = invoke_with_retry(  # type: ignore[assignment]
+            lambda: _llm.with_structured_output(ClarifyDecision).invoke(messages)
+        )
+    except Exception as e:
+        return {"next_action": "fallback", "error_source": "clarify_policy_node", "error_detail": sanitize_error(e)}
 
     if response.action == "ask_human":
         return {
@@ -257,7 +266,24 @@ def clarify_fallback_node(state: AssetState) -> dict[str, Any]:
         {"role": "system", "content": CLARIFY_FALLBACK_SYSTEM},
         {"role": "user", "content": "\n".join(lines)},
     ]
-    message = str(_llm.invoke(messages).content)  # type: ignore[arg-type]
+    try:
+        message = str(invoke_with_retry(lambda: _llm.invoke(messages)).content)  # type: ignore[union-attr]
+    except Exception as e:
+        message = "I'm sorry, I wasn't able to process that request. Please try rephrasing your question."
+        return {
+            "result": message,
+            "result_type": "fallback",
+            "error_source": "clarify_fallback_node",
+            "error_detail": sanitize_error(e),
+            "last_clarify_question": None,
+            "last_clarify_answer": None,
+            "pending_question": None,
+            "clarify_attempts": 0,
+            "raw_properties": [],
+            "unresolved_entities": [],
+            "tool_result": {},
+            "messages": Overwrite([]),
+        }
     return {
         "result": message,
         "result_type": "fallback",

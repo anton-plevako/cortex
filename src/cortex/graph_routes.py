@@ -9,7 +9,9 @@ from cortex.state import AssetState
 
 
 def route_after_classify(state: AssetState) -> str:
-    """off_topic goes to clarify_entry hub; everything else goes to validate_and_resolve."""
+    """Route based on error state first, then request_type."""
+    if state.get("error_bucket", "").startswith("FALLBACK"):
+        return "clarify_entry"
     if state.get("request_type") == "off_topic":
         return "clarify_entry"
     return "validate_and_resolve"

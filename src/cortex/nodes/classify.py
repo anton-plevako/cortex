@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from cortex.prompts import UNDERSTAND_SYSTEM
 from cortex.state import AssetState
 
-from ._shared import _llm
+from ._shared import _llm, invoke_with_retry, sanitize_error
 
 
 class _Classification(BaseModel):
@@ -30,16 +30,29 @@ class _Classification(BaseModel):
 def classify_node(state: AssetState) -> dict:
     # Use the mutable working copy if available (set after clarify loops); fall back to raw input
     query_text = state.get("user_query_working") or state["user_query"]
-    result: _Classification = _llm.with_structured_output(_Classification).invoke(  # type: ignore[assignment]
-        [
-            {"role": "system", "content": UNDERSTAND_SYSTEM},
-            {"role": "user", "content": query_text},
-        ]
-    )
+    messages = [
+        {"role": "system", "content": UNDERSTAND_SYSTEM},
+        {"role": "user", "content": query_text},
+    ]
+    try:
+        result: _Classification = invoke_with_retry(  # type: ignore[assignment]
+            lambda: _llm.with_structured_output(_Classification).invoke(messages)
+        )
+    except Exception as e:
+        return {
+            "request_type": state.get("request_type") or "fallback",  # preserve last-known; never "off_topic"
+            "error_bucket": "FALLBACK_EXEC_ERROR",
+            "error_source": "classify_node",
+            "error_detail": sanitize_error(e),
+            "raw_properties": [],
+            "timeframe": {},
+        }
     error_bucket = "FALLBACK_OFF_TOPIC" if result.request_type == "off_topic" else ""
     out: dict = {
         "request_type": result.request_type,
         "error_bucket": error_bucket,
+        "error_source": "",
+        "error_detail": "",
         "raw_properties": result.properties,
         "timeframe": {
             "year": result.year,
